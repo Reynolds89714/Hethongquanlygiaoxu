@@ -170,11 +170,44 @@ class ParishManagementAPITester:
             "Get Student Grades",
             "GET",
             f"api/grades/student/{self.student_id}",
-            200
+            200,
+            auth=True
         )
         if success:
-            print(f"Student average: {response['average']}, Status: {response['status']}")
-            print(f"Subjects: {list(response['subjects'].keys())}")
+            print(f"Student: {response['student']['name']}")
+            print(f"Semester 1 Average: {response['semester_1_average']}")
+            print(f"Semester 2 Average: {response['semester_2_average']}")
+            print(f"Final Average: {response['final_average']}")
+            print(f"Status: {response['status']}")
+        return success
+        
+    def test_update_grades(self):
+        """Test updating student grades"""
+        if not self.student_id or self.user_type != 'teacher':
+            print("❌ Cannot test grade update - requires teacher login and student ID")
+            return False
+            
+        # Test updating semester 1 grades
+        grade_data = {
+            "tx1": 8.5,
+            "tx2": 9.0,
+            "tx3": 7.5,
+            "tx4": 8.0,
+            "gk": 8.5,
+            "ck": 9.0
+        }
+        
+        success, response = self.run_test(
+            "Update Student Grades",
+            "PUT",
+            f"api/grades/student/{self.student_id}/semester/1",
+            200,
+            data=grade_data,
+            auth=True
+        )
+        
+        if success:
+            print(f"Updated grades for semester 1: {response['message']}")
         return success
 
     def test_get_teachers(self):
