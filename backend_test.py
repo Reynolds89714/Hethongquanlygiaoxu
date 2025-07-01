@@ -217,24 +217,35 @@ def main():
     # Setup tester
     tester = ParishManagementAPITester(backend_url)
     
-    # Run tests
-    tests = [
-        tester.test_root_endpoint,
+    # Run tests - focusing on the fixed endpoints first
+    print("\n🔍 TESTING FIXED ENDPOINTS FOR MONGODB OBJECTID SERIALIZATION:")
+    fixed_tests = [
         tester.test_init_sample_data,
         tester.test_get_students,
-        tester.test_get_students_with_filter,
-        tester.test_get_students_with_search,
-        tester.test_get_student_by_id,
         tester.test_get_student_grades,
-        tester.test_get_teachers,
-        tester.test_get_news,
-        tester.test_get_stats,
         tester.test_generate_qr_code,
         tester.test_scan_qr
     ]
     
-    # Run all tests
-    for test in tests:
+    # Run fixed tests
+    for test in fixed_tests:
+        test()
+        time.sleep(0.5)  # Small delay between tests
+    
+    # Run remaining tests
+    print("\n🔍 TESTING OTHER ENDPOINTS:")
+    other_tests = [
+        tester.test_root_endpoint,
+        tester.test_get_students_with_filter,
+        tester.test_get_students_with_search,
+        tester.test_get_student_by_id,
+        tester.test_get_teachers,
+        tester.test_get_news,
+        tester.test_get_stats
+    ]
+    
+    # Run all other tests
+    for test in other_tests:
         test()
         time.sleep(0.5)  # Small delay between tests
     
