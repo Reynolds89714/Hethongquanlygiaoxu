@@ -160,14 +160,22 @@ async def create_grade(grade: GradeCreate):
 
 @api_router.get("/grades/student/{student_id}")
 async def get_student_grades(student_id: str):
-    grades = await db.grades.find({"student_id": student_id}).to_list(1000)
+    grades_cursor = db.grades.find({"student_id": student_id})
+    grades = await grades_cursor.to_list(1000)
+    
+    # Convert ObjectId to string and clean up data
+    cleaned_grades = []
+    for grade in grades:
+        if "_id" in grade:
+            del grade["_id"]  # Remove MongoDB ObjectId
+        cleaned_grades.append(grade)
     
     # Calculate average and status
     total_score = 0
     count = 0
     subjects = {}
     
-    for grade in grades:
+    for grade in cleaned_grades:
         total_score += grade["score"]
         count += 1
         subject = grade["subject"]
@@ -189,7 +197,7 @@ async def get_student_grades(student_id: str):
             break
     
     return {
-        "grades": grades,
+        "grades": cleaned_grades,
         "average": round(average, 2),
         "status": pass_status,
         "subjects": subjects
