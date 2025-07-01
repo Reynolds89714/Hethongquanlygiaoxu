@@ -1,4 +1,5 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12,6 +13,10 @@ from datetime import datetime, date
 import qrcode
 import base64
 from io import BytesIO
+import jwt
+from passlib.hash import bcrypt
+import secrets
+import string
 
 
 ROOT_DIR = Path(__file__).parent
@@ -22,21 +27,41 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
+# JWT settings
+JWT_SECRET = "phuly_parish_secret_key_2024"
+JWT_ALGORITHM = "HS256"
 
-# Create a router with the /api prefix
+# Create the main app
+app = FastAPI(title="Giáo Xứ Phú Lý - Hệ Thống Quản Lý")
 api_router = APIRouter(prefix="/api")
 
+# Security
+security = HTTPBearer()
 
-# Define Models
+# Auth Models
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class ParentLogin(BaseModel):
+    phone: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user_type: str
+    user_info: dict
+
+# Student Models
 class Student(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     class_name: str
     birth_date: Optional[str] = None
-    parent_name: Optional[str] = None
-    phone: Optional[str] = None
+    parent_name: str
+    parent_phone: str
+    parent_password: str  # Password for parent login
     address: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -44,67 +69,79 @@ class StudentCreate(BaseModel):
     name: str
     class_name: str
     birth_date: Optional[str] = None
-    parent_name: Optional[str] = None
-    phone: Optional[str] = None
+    parent_name: str
+    parent_phone: str
     address: Optional[str] = None
 
+# Grade Models with Excel-like structure
 class Grade(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     student_id: str
     student_name: str
     class_name: str
-    subject: str  # "kinh_thanh", "giao_ly", "hanh_vi", "tham_gia"
-    score: float
-    max_score: float = 10.0
-    date: datetime = Field(default_factory=datetime.utcnow)
-    semester: str = "HK1"  # HK1, HK2
     year: str = "2024-2025"
+    semester: int = 1  # 1 or 2
+    # Excel columns: TX1, TX2, TX3, TX4, GK (Giữa Kỳ), CK (Cuối Kỳ)
+    tx1: Optional[float] = None
+    tx2: Optional[float] = None
+    tx3: Optional[float] = None
+    tx4: Optional[float] = None
+    gk: Optional[float] = None  # Giữa kỳ
+    ck: Optional[float] = None  # Cuối kỳ
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-class GradeCreate(BaseModel):
-    student_id: str
-    subject: str
-    score: float
-    max_score: float = 10.0
-    semester: str = "HK1"
-    year: str = "2024-2025"
+class GradeUpdate(BaseModel):
+    tx1: Optional[float] = None
+    tx2: Optional[float] = None
+    tx3: Optional[float] = None
+    tx4: Optional[float] = None
+    gk: Optional[float] = None
+    ck: Optional[float] = None
 
+# Attendance Models
 class Attendance(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     student_id: str
     student_name: str
     class_name: str
-    date: datetime = Field(default_factory=datetime.utcnow)
-    status: str = "present"  # present, absent, late
+    date: str  # YYYY-MM-DD format
+    status: str = "present"  # present, absent_with_permission, absent_without_permission
     method: str = "manual"   # manual, qr_code
+    note: Optional[str] = None
+    recorded_by: str  # teacher username
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class AttendanceCreate(BaseModel):
     student_id: str
+    date: str
     status: str = "present"
     method: str = "manual"
+    note: Optional[str] = None
 
-class Teacher(BaseModel):
+# User Models
+class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    classes: List[str] = []
-    role: str = "teacher"  # teacher, coordinator, admin
+    username: str
+    password_hash: str
+    full_name: str
+    role: str  # admin, teacher
+    classes: List[str] = []  # Classes this teacher manages
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
-class TeacherCreate(BaseModel):
-    name: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    classes: List[str] = []
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
     role: str = "teacher"
+    classes: List[str] = []
 
+# News Models
 class News(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
     content: str
     author: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
     published: bool = True
 
 class NewsCreate(BaseModel):
@@ -113,128 +150,373 @@ class NewsCreate(BaseModel):
     author: str
     published: bool = True
 
+# Auth functions
+def create_access_token(data: dict):
+    return jwt.encode(data, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-# Student Routes
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def generate_password(length=8):
+    """Generate random password for parents"""
+    characters = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
+# Auth endpoints
+@api_router.post("/auth/teacher-login", response_model=TokenResponse)
+async def teacher_login(login_data: UserLogin):
+    user = await db.users.find_one({"username": login_data.username})
+    if not user or not bcrypt.verify(login_data.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Clean up ObjectId
+    if "_id" in user:
+        del user["_id"]
+    
+    token_data = {
+        "user_id": user["id"],
+        "username": user["username"],
+        "role": user["role"],
+        "user_type": "teacher"
+    }
+    
+    token = create_access_token(token_data)
+    
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user_type="teacher",
+        user_info=user
+    )
+
+@api_router.post("/auth/parent-login", response_model=TokenResponse)
+async def parent_login(login_data: ParentLogin):
+    student = await db.students.find_one({
+        "parent_phone": login_data.phone,
+        "parent_password": login_data.password
+    })
+    
+    if not student:
+        raise HTTPException(status_code=401, detail="Số điện thoại hoặc mật khẩu không đúng")
+    
+    # Clean up ObjectId
+    if "_id" in student:
+        del student["_id"]
+    
+    token_data = {
+        "student_id": student["id"],
+        "parent_phone": student["parent_phone"],
+        "user_type": "parent"
+    }
+    
+    token = create_access_token(token_data)
+    
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user_type="parent",
+        user_info={
+            "student": student,
+            "parent_name": student["parent_name"],
+            "parent_phone": student["parent_phone"]
+        }
+    )
+
+# Student endpoints
 @api_router.post("/students", response_model=Student)
-async def create_student(student: StudentCreate):
+async def create_student(student: StudentCreate, token_data: dict = Depends(verify_token)):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can create students")
+    
+    # Generate password for parent
+    parent_password = generate_password()
+    
     student_dict = student.dict()
+    student_dict["parent_password"] = parent_password
     student_obj = Student(**student_dict)
+    
     await db.students.insert_one(student_obj.dict())
     return student_obj
 
 @api_router.get("/students", response_model=List[Student])
-async def get_students(class_name: Optional[str] = Query(None), search: Optional[str] = Query(None)):
+async def get_students(
+    class_name: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    token_data: dict = Depends(verify_token)
+):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can access student list")
+    
     query = {}
     if class_name:
         query["class_name"] = class_name
     if search:
         query["$or"] = [
             {"name": {"$regex": search, "$options": "i"}},
-            {"class_name": {"$regex": search, "$options": "i"}}
+            {"class_name": {"$regex": search, "$options": "i"}},
+            {"parent_name": {"$regex": search, "$options": "i"}}
         ]
     
-    students = await db.students.find(query).to_list(1000)
-    return [Student(**student) for student in students]
+    students_cursor = db.students.find(query)
+    students = await students_cursor.to_list(1000)
+    
+    # Clean up ObjectId
+    cleaned_students = []
+    for student in students:
+        if "_id" in student:
+            del student["_id"]
+        cleaned_students.append(Student(**student))
+    
+    return cleaned_students
 
-@api_router.get("/students/{student_id}", response_model=Student)
-async def get_student(student_id: str):
+@api_router.put("/students/{student_id}")
+async def update_student(
+    student_id: str,
+    student_update: StudentCreate,
+    token_data: dict = Depends(verify_token)
+):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can update students")
+    
+    result = await db.students.update_one(
+        {"id": student_id},
+        {"$set": student_update.dict(exclude_unset=True)}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    return {"message": "Student updated successfully"}
+
+# Grade endpoints
+@api_router.get("/grades/student/{student_id}")
+async def get_student_grades(student_id: str, token_data: dict = Depends(verify_token)):
+    # Allow both teachers and parents (if it's their child)
+    if token_data["user_type"] == "parent":
+        if token_data["student_id"] != student_id:
+            raise HTTPException(status_code=403, detail="Parents can only view their own child's grades")
+    elif token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    # Get student info
     student = await db.students.find_one({"id": student_id})
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    return Student(**student)
-
-# Grade Routes
-@api_router.post("/grades", response_model=Grade)
-async def create_grade(grade: GradeCreate):
-    # Get student info
-    student = await db.students.find_one({"id": grade.student_id})
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
     
-    grade_dict = grade.dict()
-    grade_dict["student_name"] = student["name"]
-    grade_dict["class_name"] = student["class_name"]
-    grade_obj = Grade(**grade_dict)
-    await db.grades.insert_one(grade_obj.dict())
-    return grade_obj
-
-@api_router.get("/grades/student/{student_id}")
-async def get_student_grades(student_id: str):
+    # Clean up ObjectId
+    if "_id" in student:
+        del student["_id"]
+    
+    # Get grades for both semesters
     grades_cursor = db.grades.find({"student_id": student_id})
     grades = await grades_cursor.to_list(1000)
     
-    # Convert ObjectId to string and clean up data
-    cleaned_grades = []
+    # Clean up ObjectId and organize by semester
+    semester_1 = None
+    semester_2 = None
+    
     for grade in grades:
         if "_id" in grade:
-            del grade["_id"]  # Remove MongoDB ObjectId
-        cleaned_grades.append(grade)
+            del grade["_id"]
+        
+        if grade["semester"] == 1:
+            semester_1 = grade
+        elif grade["semester"] == 2:
+            semester_2 = grade
     
-    # Calculate average and status
-    total_score = 0
-    count = 0
-    subjects = {}
+    # Calculate averages and final result
+    def calculate_semester_average(grade_record):
+        if not grade_record:
+            return 0
+        
+        scores = []
+        # TX scores (if available)
+        for tx in [grade_record.get("tx1"), grade_record.get("tx2"), 
+                   grade_record.get("tx3"), grade_record.get("tx4")]:
+            if tx is not None:
+                scores.append(tx)
+        
+        gk = grade_record.get("gk")
+        ck = grade_record.get("ck")
+        
+        if not scores and not gk and not ck:
+            return 0
+        
+        # Calculate average: TX average + GK*2 + CK*3 / 6
+        tx_avg = sum(scores) / len(scores) if scores else 0
+        
+        total_weight = 0
+        total_score = 0
+        
+        if scores:
+            total_score += tx_avg * 1
+            total_weight += 1
+        
+        if gk is not None:
+            total_score += gk * 2
+            total_weight += 2
+        
+        if ck is not None:
+            total_score += ck * 3
+            total_weight += 3
+        
+        return total_score / total_weight if total_weight > 0 else 0
     
-    for grade in cleaned_grades:
-        total_score += grade["score"]
-        count += 1
-        subject = grade["subject"]
-        if subject not in subjects:
-            subjects[subject] = []
-        subjects[subject].append(grade["score"])
+    sem1_avg = calculate_semester_average(semester_1)
+    sem2_avg = calculate_semester_average(semester_2)
     
-    average = total_score / count if count > 0 else 0
+    # Final average
+    final_avg = (sem1_avg + sem2_avg) / 2 if sem1_avg > 0 and sem2_avg > 0 else max(sem1_avg, sem2_avg)
     
-    # Determine pass status (>= 6.5 average and all subjects >= 5)
-    pass_status = "Lên lớp"
-    if average < 6.5:
-        pass_status = "Học lại"
-    
-    for subject, scores in subjects.items():
-        subject_avg = sum(scores) / len(scores)
-        if subject_avg < 5.0:
-            pass_status = "Học lại"
-            break
+    # Determine status
+    status = "Lên lớp" if final_avg >= 6.5 else "Học lại"
     
     return {
-        "grades": cleaned_grades,
-        "average": round(average, 2),
-        "status": pass_status,
-        "subjects": subjects
+        "student": student,
+        "semester_1": semester_1,
+        "semester_2": semester_2,
+        "semester_1_average": round(sem1_avg, 2),
+        "semester_2_average": round(sem2_avg, 2),
+        "final_average": round(final_avg, 2),
+        "status": status
     }
 
-# Attendance Routes
-@api_router.post("/attendance", response_model=Attendance)
-async def create_attendance(attendance: AttendanceCreate):
+@api_router.put("/grades/student/{student_id}/semester/{semester}")
+async def update_grades(
+    student_id: str,
+    semester: int,
+    grade_update: GradeUpdate,
+    token_data: dict = Depends(verify_token)
+):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can update grades")
+    
+    # Get student info
+    student = await db.students.find_one({"id": student_id})
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Check if grade record exists
+    existing_grade = await db.grades.find_one({
+        "student_id": student_id,
+        "semester": semester
+    })
+    
+    if existing_grade:
+        # Update existing record
+        await db.grades.update_one(
+            {"student_id": student_id, "semester": semester},
+            {"$set": grade_update.dict(exclude_unset=True)}
+        )
+    else:
+        # Create new record
+        grade_dict = grade_update.dict(exclude_unset=True)
+        grade_dict.update({
+            "student_id": student_id,
+            "student_name": student["name"],
+            "class_name": student["class_name"],
+            "semester": semester
+        })
+        grade_obj = Grade(**grade_dict)
+        await db.grades.insert_one(grade_obj.dict())
+    
+    return {"message": "Grades updated successfully"}
+
+# Attendance endpoints
+@api_router.get("/attendance/class/{class_name}")
+async def get_class_attendance(
+    class_name: str,
+    date: Optional[str] = Query(None),
+    token_data: dict = Depends(verify_token)
+):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can view attendance")
+    
+    # Get all students in class
+    students_cursor = db.students.find({"class_name": class_name})
+    students = await students_cursor.to_list(1000)
+    
+    query = {"class_name": class_name}
+    if date:
+        query["date"] = date
+    
+    # Get attendance records
+    attendance_cursor = db.attendance.find(query)
+    attendance_records = await attendance_cursor.to_list(1000)
+    
+    # Clean up ObjectId
+    for record in attendance_records:
+        if "_id" in record:
+            del record["_id"]
+    
+    # Create attendance matrix
+    attendance_dict = {}
+    for record in attendance_records:
+        key = f"{record['student_id']}_{record['date']}"
+        attendance_dict[key] = record
+    
+    return {
+        "students": students,
+        "attendance_records": attendance_records,
+        "class_name": class_name,
+        "date": date
+    }
+
+@api_router.post("/attendance")
+async def create_attendance(
+    attendance: AttendanceCreate,
+    token_data: dict = Depends(verify_token)
+):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can mark attendance")
+    
     # Get student info
     student = await db.students.find_one({"id": attendance.student_id})
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
-    attendance_dict = attendance.dict()
-    attendance_dict["student_name"] = student["name"]
-    attendance_dict["class_name"] = student["class_name"]
-    attendance_obj = Attendance(**attendance_dict)
-    await db.attendance.insert_one(attendance_obj.dict())
-    return attendance_obj
-
-@api_router.get("/attendance/student/{student_id}")
-async def get_student_attendance(student_id: str):
-    attendance_cursor = db.attendance.find({"student_id": student_id})
-    attendance_records = await attendance_cursor.to_list(1000)
+    # Check if attendance already exists for this date
+    existing = await db.attendance.find_one({
+        "student_id": attendance.student_id,
+        "date": attendance.date
+    })
     
-    # Clean up ObjectId
-    cleaned_records = []
-    for record in attendance_records:
-        if "_id" in record:
-            del record["_id"]
-        cleaned_records.append(record)
+    if existing:
+        # Update existing
+        await db.attendance.update_one(
+            {"student_id": attendance.student_id, "date": attendance.date},
+            {"$set": {
+                "status": attendance.status,
+                "method": attendance.method,
+                "note": attendance.note,
+                "recorded_by": token_data["username"]
+            }}
+        )
+    else:
+        # Create new
+        attendance_dict = attendance.dict()
+        attendance_dict.update({
+            "student_name": student["name"],
+            "class_name": student["class_name"],
+            "recorded_by": token_data["username"]
+        })
+        attendance_obj = Attendance(**attendance_dict)
+        await db.attendance.insert_one(attendance_obj.dict())
     
-    return cleaned_records
+    return {"message": "Attendance recorded successfully"}
 
-# QR Code Routes
+# QR Code endpoints
 @api_router.get("/qr-code/{student_id}")
-async def generate_qr_code(student_id: str):
+async def generate_qr_code(student_id: str, token_data: dict = Depends(verify_token)):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can generate QR codes")
+    
     student = await db.students.find_one({"id": student_id})
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -265,7 +547,10 @@ async def generate_qr_code(student_id: str):
     }
 
 @api_router.post("/scan-qr")
-async def scan_qr_attendance(qr_data: dict):
+async def scan_qr_attendance(qr_data: dict, token_data: dict = Depends(verify_token)):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can scan QR codes")
+    
     try:
         data = qr_data.get("data", "")
         if not data.startswith("STUDENT:"):
@@ -283,56 +568,68 @@ async def scan_qr_attendance(qr_data: dict):
         if "_id" in student:
             del student["_id"]
         
+        # Create attendance record for today
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Check if already marked today
+        existing = await db.attendance.find_one({
+            "student_id": student_id,
+            "date": today
+        })
+        
+        if existing:
+            return {"message": "Đã điểm danh hôm nay", "student": student}
+        
         # Create attendance record
         attendance_obj = Attendance(
             student_id=student_id,
             student_name=student["name"],
             class_name=student["class_name"],
+            date=today,
             status="present",
-            method="qr_code"
+            method="qr_code",
+            recorded_by=token_data["username"]
         )
         await db.attendance.insert_one(attendance_obj.dict())
         
-        return {"message": "Điểm danh thành công", "student": student}
+        return {"message": f"Điểm danh thành công cho {student['name']}", "student": student}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing QR code: {str(e)}")
 
-# Teacher Routes
-@api_router.post("/teachers", response_model=Teacher)
-async def create_teacher(teacher: TeacherCreate):
-    teacher_dict = teacher.dict()
-    teacher_obj = Teacher(**teacher_dict)
-    await db.teachers.insert_one(teacher_obj.dict())
-    return teacher_obj
+# News endpoints
+@api_router.get("/news", response_model=List[News])
+async def get_news():
+    news_cursor = db.news.find({"published": True}).sort("created_at", -1)
+    news_list = await news_cursor.to_list(100)
+    
+    # Clean up ObjectId
+    cleaned_news = []
+    for news in news_list:
+        if "_id" in news:
+            del news["_id"]
+        cleaned_news.append(News(**news))
+    
+    return cleaned_news
 
-@api_router.get("/teachers", response_model=List[Teacher])
-async def get_teachers():
-    teachers = await db.teachers.find().to_list(1000)
-    return [Teacher(**teacher) for teacher in teachers]
-
-# News Routes
 @api_router.post("/news", response_model=News)
-async def create_news(news: NewsCreate):
-    news_dict = news.dict()
-    news_obj = News(**news_dict)
+async def create_news(news: NewsCreate, token_data: dict = Depends(verify_token)):
+    if token_data["user_type"] != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can create news")
+    
+    news_obj = News(**news.dict())
     await db.news.insert_one(news_obj.dict())
     return news_obj
 
-@api_router.get("/news", response_model=List[News])
-async def get_news():
-    news_list = await db.news.find({"published": True}).sort("created_at", -1).to_list(100)
-    return [News(**news) for news in news_list]
-
-# Statistics Routes
+# Statistics endpoints
 @api_router.get("/stats/overview")
 async def get_overview_stats():
     total_students = await db.students.count_documents({})
-    total_teachers = await db.teachers.count_documents({})
+    total_teachers = await db.users.count_documents({"role": {"$in": ["teacher", "admin"]}})
     total_classes = len(await db.students.distinct("class_name"))
     
-    # Get recent attendance
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_attendance = await db.attendance.count_documents({"date": {"$gte": today}})
+    # Get today's attendance
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_attendance = await db.attendance.count_documents({"date": today, "status": "present"})
     
     return {
         "total_students": total_students,
@@ -341,7 +638,7 @@ async def get_overview_stats():
         "today_attendance": today_attendance
     }
 
-# Initialize sample data
+# Initialize data
 @api_router.post("/init-sample-data")
 async def initialize_sample_data():
     # Check if data already exists
@@ -349,58 +646,76 @@ async def initialize_sample_data():
     if student_count > 0:
         return {"message": "Sample data already exists"}
     
-    # Sample students
-    sample_students = [
-        {"name": "Nguyễn Văn An", "class_name": "Lớp 1A", "parent_name": "Nguyễn Văn Nam", "phone": "0123456789"},
-        {"name": "Trần Thị Bình", "class_name": "Lớp 1A", "parent_name": "Trần Văn Bách", "phone": "0987654321"},
-        {"name": "Lê Văn Cường", "class_name": "Lớp 2A", "parent_name": "Lê Thị Cúc", "phone": "0123987456"},
-        {"name": "Phạm Thị Dung", "class_name": "Lớp 2A", "parent_name": "Phạm Văn Đức", "phone": "0987123456"},
-        {"name": "Hoàng Văn Em", "class_name": "Lớp 3A", "parent_name": "Hoàng Thị Hoa", "phone": "0123456987"},
+    # Create admin user
+    admin_password_hash = bcrypt.hash("admin123")
+    admin_user = User(
+        username="admin",
+        password_hash=admin_password_hash,
+        full_name="Quản Trị Viên",
+        role="admin"
+    )
+    await db.users.insert_one(admin_user.dict())
+    
+    # Create sample teachers
+    teachers = [
+        {"username": "glv_pedro", "password": "pedro123", "full_name": "Thầy Phêrô Nguyễn", "classes": ["Lớp 1A"]},
+        {"username": "glv_maria", "password": "maria123", "full_name": "Cô Maria Trần", "classes": ["Lớp 2A"]},
+        {"username": "glv_paulo", "password": "paulo123", "full_name": "Thầy Phao-lô Lê", "classes": ["Lớp 3A"]},
     ]
     
-    # Insert students
-    for student_data in sample_students:
+    for teacher_data in teachers:
+        password_hash = bcrypt.hash(teacher_data["password"])
+        teacher = User(
+            username=teacher_data["username"],
+            password_hash=password_hash,
+            full_name=teacher_data["full_name"],
+            role="teacher",
+            classes=teacher_data["classes"]
+        )
+        await db.users.insert_one(teacher.dict())
+    
+    # Create sample students with parent passwords
+    students = [
+        {"name": "Nguyễn Văn An", "class_name": "Lớp 1A", "parent_name": "Nguyễn Văn Nam", "parent_phone": "0123456789"},
+        {"name": "Trần Thị Bình", "class_name": "Lớp 1A", "parent_name": "Trần Văn Bách", "parent_phone": "0987654321"},
+        {"name": "Lê Văn Cường", "class_name": "Lớp 2A", "parent_name": "Lê Thị Cúc", "parent_phone": "0123987456"},
+        {"name": "Phạm Thị Dung", "class_name": "Lớp 2A", "parent_name": "Phạm Văn Đức", "parent_phone": "0987123456"},
+        {"name": "Hoàng Văn Em", "class_name": "Lớp 3A", "parent_name": "Hoàng Thị Hoa", "parent_phone": "0123456987"},
+    ]
+    
+    for student_data in students:
+        parent_password = generate_password()
+        student_data["parent_password"] = parent_password
         student_obj = Student(**student_data)
         await db.students.insert_one(student_obj.dict())
         
-        # Add sample grades
-        subjects = ["kinh_thanh", "giao_ly", "hanh_vi", "tham_gia"]
-        for subject in subjects:
+        # Create sample grades for both semesters
+        for semester in [1, 2]:
             grade_obj = Grade(
                 student_id=student_obj.id,
                 student_name=student_obj.name,
                 class_name=student_obj.class_name,
-                subject=subject,
-                score=float(7 + (hash(student_obj.id + subject) % 3))  # Random score 7-9
+                semester=semester,
+                tx1=7.5, tx2=8.0, tx3=7.0, tx4=8.5,
+                gk=8.0, ck=7.5
             )
             await db.grades.insert_one(grade_obj.dict())
     
-    # Sample teachers
-    sample_teachers = [
-        {"name": "Thầy Phêrô Nguyễn", "email": "pedro@giaoxu.com", "classes": ["Lớp 1A"], "role": "teacher"},
-        {"name": "Cô Maria Trần", "email": "maria@giaoxu.com", "classes": ["Lớp 2A"], "role": "teacher"},
-        {"name": "Thầy Phao-lô Lê", "email": "paulo@giaoxu.com", "classes": ["Lớp 3A"], "role": "coordinator"},
-    ]
-    
-    for teacher_data in sample_teachers:
-        teacher_obj = Teacher(**teacher_data)
-        await db.teachers.insert_one(teacher_obj.dict())
-    
-    # Sample news
-    sample_news = [
+    # Create sample news
+    news_items = [
         {
             "title": "Thông báo khai giảng năm học mới 2024-2025",
-            "content": "Giáo xứ thông báo lịch khai giảng năm học Giáo lý 2024-2025 vào ngày Chủ nhật 15/9/2024. Kính mời các em học sinh và phụ huynh tham dự.",
+            "content": "Giáo Xứ Phú Lý thông báo lịch khai giảng năm học Giáo lý 2024-2025 vào ngày Chủ nhật 15/9/2024. Kính mời các em học sinh và phụ huynh tham dự.",
             "author": "Ban Giáo lý"
         },
         {
             "title": "Lễ Thánh Giuse thợ 19/3",
-            "content": "Giáo xứ sẽ tổ chức Lễ Thánh Giuse thợ vào ngày 19/3. Chương trình gồm Thánh lễ và các hoạt động văn nghệ.",
+            "content": "Giáo Xứ Phú Lý sẽ tổ chức Lễ Thánh Giuse thợ vào ngày 19/3. Chương trình gồm Thánh lễ và các hoạt động văn nghệ.",
             "author": "Ban Tổ chức"
         }
     ]
     
-    for news_data in sample_news:
+    for news_data in news_items:
         news_obj = News(**news_data)
         await db.news.insert_one(news_obj.dict())
     
@@ -409,9 +724,9 @@ async def initialize_sample_data():
 # Root endpoint
 @api_router.get("/")
 async def root():
-    return {"message": "Parish Management System API"}
+    return {"message": "Giáo Xứ Phú Lý - Hệ Thống Quản Lý API"}
 
-# Include the router in the main app
+# Include router
 app.include_router(api_router)
 
 app.add_middleware(
@@ -422,11 +737,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
