@@ -9,11 +9,19 @@ class ParishManagementAPITester:
         self.tests_run = 0
         self.tests_passed = 0
         self.student_id = None
+        self.token = None
+        self.user_type = None
+        self.parent_phone = None
+        self.parent_password = None
 
-    def run_test(self, name, method, endpoint, expected_status, data=None, params=None):
+    def run_test(self, name, method, endpoint, expected_status, data=None, params=None, auth=False):
         """Run a single API test"""
         url = f"{self.base_url}/{endpoint}"
         headers = {'Content-Type': 'application/json'}
+        
+        # Add authorization header if token is available and auth is required
+        if auth and self.token:
+            headers['Authorization'] = f'Bearer {self.token}'
         
         self.tests_run += 1
         print(f"\n🔍 Testing {name}...")
@@ -23,6 +31,8 @@ class ParishManagementAPITester:
                 response = requests.get(url, headers=headers, params=params)
             elif method == 'POST':
                 response = requests.post(url, json=data, headers=headers)
+            elif method == 'PUT':
+                response = requests.put(url, json=data, headers=headers)
 
             success = response.status_code == expected_status
             if success:
