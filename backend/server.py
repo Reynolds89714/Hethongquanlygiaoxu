@@ -220,8 +220,17 @@ async def create_attendance(attendance: AttendanceCreate):
 
 @api_router.get("/attendance/student/{student_id}")
 async def get_student_attendance(student_id: str):
-    attendance_records = await db.attendance.find({"student_id": student_id}).to_list(1000)
-    return attendance_records
+    attendance_cursor = db.attendance.find({"student_id": student_id})
+    attendance_records = await attendance_cursor.to_list(1000)
+    
+    # Clean up ObjectId
+    cleaned_records = []
+    for record in attendance_records:
+        if "_id" in record:
+            del record["_id"]
+        cleaned_records.append(record)
+    
+    return cleaned_records
 
 # QR Code Routes
 @api_router.get("/qr-code/{student_id}")
