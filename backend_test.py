@@ -58,6 +58,43 @@ class ParishManagementAPITester:
         )
         return success
 
+    def test_teacher_login(self, username="admin", password="admin123"):
+        """Test teacher login"""
+        success, response = self.run_test(
+            "Teacher Login",
+            "POST",
+            "api/auth/teacher-login",
+            200,
+            data={"username": username, "password": password}
+        )
+        if success and 'access_token' in response:
+            self.token = response['access_token']
+            self.user_type = response['user_type']
+            print(f"Logged in as {username} with role: {response['user_info']['role']}")
+            return True
+        return False
+
+    def test_parent_login(self):
+        """Test parent login"""
+        if not self.parent_phone or not self.parent_password:
+            print("❌ No parent credentials available for testing")
+            return False
+            
+        success, response = self.run_test(
+            "Parent Login",
+            "POST",
+            "api/auth/parent-login",
+            200,
+            data={"phone": self.parent_phone, "password": self.parent_password}
+        )
+        if success and 'access_token' in response:
+            self.token = response['access_token']
+            self.user_type = response['user_type']
+            print(f"Logged in as parent for student: {response['user_info']['student']['name']}")
+            self.student_id = response['user_info']['student']['id']
+            return True
+        return False
+
     def test_init_sample_data(self):
         """Test initializing sample data"""
         success, response = self.run_test(
