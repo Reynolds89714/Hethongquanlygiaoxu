@@ -239,6 +239,10 @@ async def generate_qr_code(student_id: str):
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
+    # Clean up ObjectId
+    if "_id" in student:
+        del student["_id"]
+    
     # Generate QR code data
     qr_data = f"STUDENT:{student_id}:{student['name']}"
     
