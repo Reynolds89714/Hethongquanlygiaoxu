@@ -279,6 +279,10 @@ async def scan_qr_attendance(qr_data: dict):
         if not student:
             raise HTTPException(status_code=404, detail="Student not found")
         
+        # Clean up ObjectId
+        if "_id" in student:
+            del student["_id"]
+        
         # Create attendance record
         attendance_obj = Attendance(
             student_id=student_id,
