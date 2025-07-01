@@ -297,37 +297,58 @@ def main():
     # Setup tester
     tester = ParishManagementAPITester(backend_url)
     
-    # Run tests - focusing on the fixed endpoints first
-    print("\n🔍 TESTING FIXED ENDPOINTS FOR MONGODB OBJECTID SERIALIZATION:")
-    fixed_tests = [
-        tester.test_init_sample_data,
-        tester.test_get_students,
-        tester.test_get_student_grades,
-        tester.test_generate_qr_code,
-        tester.test_scan_qr
-    ]
+    # Initialize sample data
+    print("\n🔍 INITIALIZING SAMPLE DATA:")
+    tester.test_init_sample_data()
     
-    # Run fixed tests
-    for test in fixed_tests:
-        test()
-        time.sleep(0.5)  # Small delay between tests
+    # Test authentication
+    print("\n🔍 TESTING AUTHENTICATION:")
     
-    # Run remaining tests
-    print("\n🔍 TESTING OTHER ENDPOINTS:")
-    other_tests = [
-        tester.test_root_endpoint,
-        tester.test_get_students_with_filter,
-        tester.test_get_students_with_search,
-        tester.test_get_student_by_id,
-        tester.test_get_teachers,
-        tester.test_get_news,
-        tester.test_get_stats
-    ]
+    # Test teacher login
+    teacher_login_success = tester.test_teacher_login()
+    if not teacher_login_success:
+        print("❌ Teacher login failed, cannot proceed with teacher-only tests")
     
-    # Run all other tests
-    for test in other_tests:
-        test()
-        time.sleep(0.5)  # Small delay between tests
+    # Get students to find parent credentials
+    if teacher_login_success:
+        success, students = tester.run_test(
+            "Get Students for Parent Login",
+            "GET",
+            "api/students",
+            200,
+            auth=True
+        )
+        
+        if success and len(students) > 0:
+            # Save the first student's parent credentials for testing
+            student = students[0]
+            tester.student_id = student['id']
+            tester.parent_phone = student['parent_phone']
+            tester.parent_password = student['parent_password']
+            print(f"Found parent credentials - Phone: {tester.parent_phone}, Password: {tester.parent_password}")
+    
+    # Test grade management
+    print("\n🔍 TESTING GRADE MANAGEMENT:")
+    if teacher_login_success:
+        tester.test_update_grades()
+        tester.test_get_student_grades()
+    
+    # Test parent login
+    print("\n🔍 TESTING PARENT LOGIN:")
+    # Reset token before parent login
+    tester.token = None
+    parent_login_success = tester.test_parent_login()
+    
+    # Test parent access to grades
+    if parent_login_success:
+        print("\n🔍 TESTING PARENT ACCESS TO GRADES:")
+        tester.test_get_student_grades()
+    
+    # Test news endpoint (public)
+    print("\n🔍 TESTING PUBLIC ENDPOINTS:")
+    tester.token = None  # Reset token to test without auth
+    tester.test_get_news()
+    tester.test_root_endpoint()
     
     # Print results
     print(f"\n📊 Tests passed: {tester.tests_passed}/{tester.tests_run}")
